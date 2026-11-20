@@ -18,6 +18,7 @@ from scripts.dataset import parse_timestamp
 DIMENSION = 384
 LOGGER = logging.getLogger(__name__)
 
+# A conflict returns no row, so only the transaction that claims the ID can apply the event.
 CLAIM_MESSAGE = """
     INSERT INTO processed_messages (message_id)
     VALUES (%s)
@@ -25,6 +26,8 @@ CLAIM_MESSAGE = """
     RETURNING message_id
 """
 
+# Postgres compares the tuple left to right. Source time wins first, then inactive
+# status wins ties, then the greater message ID wins using a fixed sort order.
 UPSERT_COMPANY = """
     INSERT INTO companies (
         registration_number, company_name, nature_of_business, state, industry,
@@ -44,6 +47,7 @@ UPSERT_COMPANY = """
         > (companies.source_updated_at, NOT companies.is_active, companies.source_message_id COLLATE "C")
 """
 
+# The schema deduplicates failed deliveries by message ID and body hash.
 RECORD_FAILURE = """
     INSERT INTO failed_messages (message_id, body_sha256, body, reason)
     VALUES (%s, %s, %s, %s)
@@ -52,16 +56,18 @@ RECORD_FAILURE = """
 
 
 class InvalidEvent(ValueError):
-    pass
+    """An input error that can be recorded and acknowledged."""
 
 
 def optional_text(value: object) -> str | None:
+    """Keep nonblank strings that can be stored as UTF-8 text in Postgres."""
     if isinstance(value, str) and value.strip() and not re.search(r"[\x00\ud800-\udfff]", value):
         return value
     return None
 
 
 def embed(description: str | None) -> str | None:
+    """Return a unit-length hashed word vector, or None if the text has no tokens."""
     counts = [0] * DIMENSION
     for token in re.findall(r"[^\W_]+", (description or "").casefold()):
         digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
@@ -74,6 +80,7 @@ def embed(description: str | None) -> str | None:
 
 
 async def persist(db: psycopg.AsyncConnection, message_id: str | None, body: bytes) -> str:
+    """Validate one event and record its ID with any resulting company change."""
     try:
         event = json.loads(body)
     except (ValueError, RecursionError) as error:
@@ -93,6 +100,7 @@ async def persist(db: psycopg.AsyncConnection, message_id: str | None, body: byt
     if updated_at is None:
         raise InvalidEvent("invalid updatedAt or missing time zone")
 
+    # Keep an inactive row and its source time so a late upsert cannot undo a strike-off.
     is_active = event_type == "company-upserted"
     data = event.get("data") if is_active else {}
     if not isinstance(data, dict):
@@ -103,6 +111,7 @@ async def persist(db: psycopg.AsyncConnection, message_id: str | None, body: byt
     state = optional_text(data.get("state"))
     industry = optional_text(data.get("industry"))
 
+    # If the company write fails, the message claim rolls back with it so a replay can retry.
     async with db.transaction():
         claim = await db.execute(CLAIM_MESSAGE, (message_id,))
         if await claim.fetchone() is None:
@@ -114,13 +123,16 @@ async def persist(db: psycopg.AsyncConnection, message_id: str | None, body: byt
                 message_id, is_active, embed(description) or embed(industry),
             ),
         )
+    # A stale event commits its message ID even though the SQL skips the company update.
     return "applied" if result.rowcount else "stale"
 
 
 async def handle_message(db: psycopg.AsyncConnection, message: aio_pika.IncomingMessage) -> str:
+    """Acknowledge this delivery after its database work succeeds."""
     try:
         outcome = await persist(db, message.message_id, message.body)
     except InvalidEvent as error:
+        # Preserve the original bytes for review, including bodies that failed JSON decoding.
         async with db.transaction():
             await db.execute(
                 RECORD_FAILURE,
@@ -129,6 +141,7 @@ async def handle_message(db: psycopg.AsyncConnection, message: aio_pika.Incoming
             )
         outcome = "rejected"
 
+    # This also acknowledges duplicates whose original write already committed.
     await message.ack()
     return outcome
 
@@ -149,6 +162,7 @@ async def consume() -> None:
             async with await psycopg.AsyncConnection.connect(database_url) as db:
                 async with await aio_pika.connect(rabbitmq_url) as connection:
                     channel = await connection.channel()
+                    # Limit this consumer to one unacknowledged delivery at a time.
                     await channel.set_qos(prefetch_count=1)
                     queue = await channel.declare_queue(QUEUE, durable=True)
                     LOGGER.info("Consuming from %s", QUEUE)
@@ -159,6 +173,8 @@ async def consume() -> None:
                             delay = 1
                     raise ConnectionError("RabbitMQ stopped delivering messages")
         except (psycopg.OperationalError, OSError, ChannelInvalidStateError) as error:
+            # Leaving the connection context closes any open channel and lets RabbitMQ
+            # redeliver unacknowledged messages.
             LOGGER.warning("Retrying ingestion in %ss after %s", delay, error)
             await asyncio.sleep(delay)
             delay = min(delay * 2, 30)

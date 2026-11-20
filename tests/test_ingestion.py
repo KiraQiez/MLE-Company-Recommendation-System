@@ -1,4 +1,4 @@
-"""Check ingestion against PostgreSQL with an isolated schema per test."""
+"""Check ingestion using real Postgres transactions and simulated RabbitMQ deliveries."""
 
 import asyncio
 import json
@@ -27,6 +27,8 @@ def event(timestamp=NEW, kind="company-upserted", registration="TEST-001", **dat
 
 
 class Delivery:
+    """Capture acknowledgement calls without sending them to RabbitMQ."""
+
     def __init__(self, message_id, body):
         self.message_id = message_id
         self.body = body
@@ -41,6 +43,7 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.db = await psycopg.AsyncConnection.connect(url, autocommit=True)
         self.addAsyncCleanup(self.db.close)
+        # A second session can only see committed writes from the consumer session.
         self.observer = await psycopg.AsyncConnection.connect(url, autocommit=True)
         self.addAsyncCleanup(self.observer.close)
         schema = sql.Identifier(f"ingestion_test_{uuid4().hex}")
@@ -69,10 +72,12 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
                 "ON source_message_id = message_id"
             ), [(1,)])
 
+        # Query Postgres when ack is called to prove the writes committed first.
         first = Delivery("one", body)
         first.ack.side_effect = check_committed
         self.assertEqual(await handle_message(self.db, first), "applied")
         first.ack.assert_awaited_once()
+        # xmin identifies the transaction that created this row version.
         query = "SELECT xmin::text, company_name, vector_dims(embedding) FROM companies"
         original = await self.query(query)
 
@@ -82,6 +87,7 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.query("SELECT count(*) FROM processed_messages"), [(1,)])
 
     async def test_failed_company_write_rolls_back_message_claim(self):
+        # Force the company write to fail after the message ID has been claimed.
         await self.db.execute("ALTER TABLE companies ADD CHECK (company_name <> 'blocked')")
         delivery = Delivery("retry", event(companyName="blocked"))
         with self.assertRaises(psycopg.errors.CheckViolation):
@@ -91,11 +97,14 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.query("SELECT count(*) FROM companies"), [(0,)])
 
     async def test_source_order_ties_strike_off_and_reactivation(self):
+        # Start with a strike-off for an unseen company. The same-time upsert loses
+        # even though its message ID sorts later.
         await self.deliver("b", event(OLD, "company-struck-off"), "applied")
         await self.deliver("z", event(OLD), "stale")
         await self.deliver("a", event("2026-08-13T08:00:00+08:00"), "stale")
         self.assertEqual(await self.query("SELECT is_active FROM companies"), [(False,)])
 
+        # A newer upsert reactivates the company. Equal-time upserts compare message IDs.
         await self.deliver("c", event(NEW, companyName="Reopened"), "applied")
         await self.deliver("d", event(NEW, companyName="Latest tie"), "applied")
         await self.deliver("aa", event(NEW), "stale")
@@ -131,6 +140,7 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
                 delivery.ack.assert_awaited_once()
                 await self.deliver(message_id, body, "rejected")
 
+        # Each bad delivery was replayed. Its failure record should exist only once.
         self.assertEqual(await self.query("SELECT count(*) FROM failed_messages"), [(len(cases),)])
         await self.deliver("good", event(), "applied")
 
@@ -145,6 +155,7 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
 
 class RetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_connection_errors_wait_with_exponential_backoff(self):
+        # Capture the requested delays without waiting, then cancel the retry loop.
         with (
             patch("consumer.__main__.psycopg.AsyncConnection.connect",
                   side_effect=psycopg.OperationalError("database unavailable")) as connect,
