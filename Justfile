@@ -10,6 +10,10 @@ setup:
 up:
     docker compose up -d --wait
 
+# Initialize the schema after Postgres is ready.
+schema:
+    docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U postgres -d companies < db/schema.sql
+
 # Stop everything and delete the volumes.
 down:
     docker compose down -v
@@ -17,3 +21,4 @@ down:
 # Replay the registry feed onto the company-events queue.
 publish:
     uv run python -m producer.publish
+
