@@ -2,6 +2,45 @@
 
 The portal looks up a Malaysian company by registration number and recommends active companies with similar business activities. RabbitMQ delivers registry events, a Python consumer maintains the latest company state, and Postgres ranks candidates with pgvector. The browser reads the company profile and recommendations from FastAPI.
 
+## Run the project from start to finish
+
+Start Docker and make sure `uv` and `just` are installed. Run the commands below from the repository root. `uv` manages Python 3.14 and the project dependencies. Internet access is needed the first time the consumer downloads the embedding model. [Prerequisites](README.md#getting-started)
+
+### 1. Set up the services and start the consumer
+
+In **terminal 1**, run these in order.
+
+```bash
+just setup
+just up
+just schema
+just consume
+```
+
+`just setup` installs the dependencies. `just up` starts Postgres and RabbitMQ. `just schema` enables pgvector and creates the tables. Leave `just consume` running and wait for `Consuming from company-events`. If your database still has vectors from the earlier hashed baseline, run `just reembed` after `just schema` and before starting the consumer.
+
+### 2. Publish the feed and start the portal
+
+In **terminal 2**, run:
+
+```bash
+just publish
+just api
+```
+
+`just publish` sends the 2,518 feed lines to RabbitMQ. Terminal 1 shows an outcome as the consumer handles each delivery. Leave `just api` running, then open [Company Explorer](http://127.0.0.1:8000/) once ingestion is ready. Look up `SYN-001550`, check the similarity bars, then click a result to open that company's profile.
+
+### 3. Check the API and run the tests
+
+In **terminal 3**, run:
+
+```bash
+curl --fail --silent --show-error 'http://127.0.0.1:8000/companies/SYN-001550/similar?limit=5'
+just test
+```
+
+The sample request returns five ranked cards in a `recommendations` list. `just test` runs the ingestion and API checks. To stop the project and keep the data for later, press **Ctrl+C** in terminals 1 and 2, then run `docker compose stop`.
+
 ## Architecture
 
 ```mermaid
