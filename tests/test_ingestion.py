@@ -191,19 +191,35 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
+                profile = await client.get("/companies/source")
+                self.assertEqual(profile.status_code, 200)
+                self.assertEqual(profile.json()["description"], "Bread")
+                inactive = await client.get("/companies/inactive")
+                self.assertEqual(inactive.status_code, 404)
+
                 response = await client.get("/companies/source/similar?limit=3")
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(
                     [card["registration_number"] for card in response.json()["recommendations"]],
                     ["tie-a", "tie-b", "sorts-first"],
                 )
+                self.assertEqual(
+                    [card["similarity_percent"] for card in response.json()["recommendations"]],
+                    [100.0, 100.0, 0.0],
+                )
                 limited = await client.get("/companies/source/similar?limit=1")
                 self.assertEqual(limited.json(), {
                     "recommendations": [
-                        {"registration_number": "tie-a", "name": None, "industry": None, "state": None}
+                        {
+                            "registration_number": "tie-a", "name": None, "industry": None,
+                            "state": None, "similarity_percent": 100.0,
+                        }
                     ]
                 })
-                for limit in (0, 21):
+                maximum = await client.get("/companies/source/similar?limit=100")
+                self.assertEqual(maximum.status_code, 200)
+                self.assertEqual(maximum.json(), response.json())
+                for limit in (0, 101):
                     invalid = await client.get(f"/companies/source/similar?limit={limit}")
                     self.assertEqual(invalid.status_code, 422)
                 for registration in ("inactive", "unknown"):

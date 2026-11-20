@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Explore Malaysian company profiles and recommendations based on business activity.">
+  <title>Company Explorer</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script src="/assets/portal.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="shell header-inner">
+      <a class="brand" href="/">Company Explorer</a>
+      <form id="lookup" class="search-row" role="search" action="/">
+        <label class="visually-hidden" for="registration">Company registration number</label>
+        <input id="registration" name="company" type="search" placeholder="Search by registration number"
+               autocomplete="off" spellcheck="false" maxlength="100" required>
+        <button type="submit">Search</button>
+      </form>
+    </div>
+  </header>
+  <main class="shell">
+    <p id="notice" class="notice" role="status">Loading company…</p>
+    <div id="workspace" class="workspace" hidden>
+      <section class="profile" aria-labelledby="profile-name">
+        <div class="profile-heading">
+          <h1 id="profile-name" tabindex="-1"></h1>
+          <span id="profile-registration" class="identifier"></span>
+        </div>
+        <p id="profile-meta" class="profile-meta"></p>
+        <p id="profile-description" class="description"></p>
+      </section>
+      <section aria-labelledby="similar-heading">
+        <div class="section-heading">
+          <h2 id="similar-heading">Similar companies</h2>
+          <label class="limit-control" for="result-limit">
+            Show
+            <select id="result-limit">
+              <option value="5">5</option>
+              <option value="10">10</option>
+              <option value="25">25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+            results
+          </label>
+        </div>
+        <p id="results-notice" class="notice" role="status" hidden></p>
+        <ol id="results" class="results" hidden></ol>
+      </section>
+    </div>
+    <noscript><p class="notice">Enable JavaScript to search and view company recommendations.</p></noscript>
+  </main>
+  <template id="card">
+    <li>
+      <a class="result-card">
+        <span class="company-cell">
+          <span class="card-name"></span>
+          <span class="identifier"></span>
+        </span>
+        <span class="card-details"></span>
+        <span class="similarity">
+          <meter min="0" max="100" value="0" aria-hidden="true"></meter>
+          <span class="score">Business similarity <strong></strong></span>
+        </span>
+      </a>
+    </li>
+  </template>
+</body>
+</html>

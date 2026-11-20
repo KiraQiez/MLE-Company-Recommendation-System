@@ -129,14 +129,22 @@ just schema
 ```
 
 Run `just consume` in one terminal. Run `just publish` in another to send the full feed. The consumer terminal shows
-an outcome for each delivery. Start `just api` in a third terminal and query the API once the company is stored.
+an outcome for each delivery. Start `just api` in a third terminal, then open the company explorer at
+http://127.0.0.1:8000/ once the feed has been ingested. Search by registration number and use the results selector
+to show up to 100 recommendations. Selecting a recommendation opens that company's profile and matches. The portal uses plain HTML, CSS,
+and JavaScript served by FastAPI.
+
+You can also query the API directly.
 
 ```bash
 curl 'http://127.0.0.1:8000/companies/SYN-001550/similar?limit=5'
 ```
 
-The API returns a `recommendations` list of cards with registration number, name, industry, and state.
-The limit defaults to 5 and accepts 1 through 20. Unknown or inactive companies return HTTP 404.
+The API returns a `recommendations` list of cards with registration number, name, industry, state,
+and `similarity_percent`. The portal shows this score as a percentage and a bar. It is cosine
+similarity scaled to 0–100, with negative scores displayed as 0. The ranking uses the original
+cosine distance, including when two display scores round to the same value.
+The limit defaults to 5 and accepts 1 through 100. Unknown or inactive companies return HTTP 404.
 An active company without a usable vector returns HTTP 200 with an empty list. Run `just test` to check
 ingestion and API behavior.
 
