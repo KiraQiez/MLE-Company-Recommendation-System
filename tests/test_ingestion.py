@@ -8,9 +8,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+import httpx
 import psycopg
 from psycopg import sql
+from psycopg.conninfo import make_conninfo
 
+from api.main import app
 from consumer.__main__ import consume, handle_message
 
 OLD = "2026-08-14T08:00:00+08:00"
@@ -24,6 +27,11 @@ def event(timestamp=NEW, kind="company-upserted", registration="TEST-001", **dat
         "updatedAt": timestamp,
         "data": data,
     }).encode()
+
+
+def fixture_vector(text):
+    first_slots = ["0", "1"] if text == "Unrelated" else ["1", "0"]
+    return "[" + ",".join(first_slots + ["0"] * 382) + "]"
 
 
 class Delivery:
@@ -46,7 +54,9 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
         # A second session can only see committed writes from the consumer session.
         self.observer = await psycopg.AsyncConnection.connect(url, autocommit=True)
         self.addAsyncCleanup(self.observer.close)
-        schema = sql.Identifier(f"ingestion_test_{uuid4().hex}")
+        schema_name = f"ingestion_test_{uuid4().hex}"
+        schema = sql.Identifier(schema_name)
+        self.api_url = make_conninfo(url, options=f"-csearch_path={schema_name},public")
         await self.db.execute(sql.SQL("CREATE SCHEMA {}").format(schema))
         self.addAsyncCleanup(
             self.db.execute, sql.SQL("DROP SCHEMA {} CASCADE").format(schema)
@@ -57,7 +67,7 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
 
     async def deliver(self, message_id, body, expected):
         delivery = Delivery(message_id, body)
-        self.assertEqual(await handle_message(self.db, delivery), expected)
+        self.assertEqual(await handle_message(self.db, delivery, fixture_vector), expected)
         delivery.ack.assert_awaited_once()
 
     async def query(self, query):
@@ -75,7 +85,7 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
         # Query Postgres when ack is called to prove the writes committed first.
         first = Delivery("one", body)
         first.ack.side_effect = check_committed
-        self.assertEqual(await handle_message(self.db, first), "applied")
+        self.assertEqual(await handle_message(self.db, first, fixture_vector), "applied")
         first.ack.assert_awaited_once()
         # xmin identifies the transaction that created this row version.
         query = "SELECT xmin::text, company_name, vector_dims(embedding) FROM companies"
@@ -91,7 +101,7 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
         await self.db.execute("ALTER TABLE companies ADD CHECK (company_name <> 'blocked')")
         delivery = Delivery("retry", event(companyName="blocked"))
         with self.assertRaises(psycopg.errors.CheckViolation):
-            await handle_message(self.db, delivery)
+            await handle_message(self.db, delivery, fixture_vector)
         delivery.ack.assert_not_awaited()
         self.assertEqual(await self.query("SELECT count(*) FROM processed_messages"), [(0,)])
         self.assertEqual(await self.query("SELECT count(*) FROM companies"), [(0,)])
@@ -136,7 +146,7 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn((message_id, body, reason), rows)
 
                 delivery.ack.side_effect = check_committed
-                self.assertEqual(await handle_message(self.db, delivery), "rejected")
+                self.assertEqual(await handle_message(self.db, delivery, fixture_vector), "rejected")
                 delivery.ack.assert_awaited_once()
                 await self.deliver(message_id, body, "rejected")
 
@@ -152,11 +162,63 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
             "FROM companies ORDER BY registration_number"
         ), [(None, None, None, "Manufacturing", 384), (None, None, None, None, None)])
 
+    async def test_recommendation_api_ranks_eligible_companies_and_bounds_limit(self):
+        for registration, text in (
+            ("source", "Bread"),
+            ("tie-b", "Bread"),
+            ("tie-a", "Bread"),
+            ("sorts-first", "Unrelated"),
+            ("unscored", None),
+            ("old-model", "Bread"),
+        ):
+            await self.deliver(registration, event(
+                registration=registration, natureOfBusiness=text
+            ), "applied")
+        await self.deliver("strike", event(
+            registration="inactive", kind="company-struck-off"
+        ), "applied")
+        await self.db.execute("""
+            UPDATE companies SET embedding_model = 'hashed-bow-v1'
+            WHERE registration_number = 'old-model'
+        """)
+        await self.db.execute("""
+            UPDATE companies SET embedding = (SELECT embedding FROM companies
+                WHERE registration_number = 'source')
+            WHERE registration_number = 'inactive'
+        """)
+
+        with patch("api.main.database_url", return_value=self.api_url):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                response = await client.get("/companies/source/similar?limit=3")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    [card["registration_number"] for card in response.json()["recommendations"]],
+                    ["tie-a", "tie-b", "sorts-first"],
+                )
+                limited = await client.get("/companies/source/similar?limit=1")
+                self.assertEqual(limited.json(), {
+                    "recommendations": [
+                        {"registration_number": "tie-a", "name": None, "industry": None, "state": None}
+                    ]
+                })
+                for limit in (0, 21):
+                    invalid = await client.get(f"/companies/source/similar?limit={limit}")
+                    self.assertEqual(invalid.status_code, 422)
+                for registration in ("inactive", "unknown"):
+                    missing = await client.get(f"/companies/{registration}/similar")
+                    self.assertEqual(missing.status_code, 404)
+                unscored = await client.get("/companies/unscored/similar")
+                self.assertEqual(unscored.status_code, 200)
+                self.assertEqual(unscored.json(), {"recommendations": []})
+
 
 class RetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_connection_errors_wait_with_exponential_backoff(self):
         # Capture the requested delays without waiting, then cancel the retry loop.
         with (
+            patch("consumer.__main__.CompanyEmbedder"),
             patch("consumer.__main__.psycopg.AsyncConnection.connect",
                   side_effect=psycopg.OperationalError("database unavailable")) as connect,
             patch("consumer.__main__.asyncio.sleep",

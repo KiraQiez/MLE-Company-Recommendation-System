@@ -123,11 +123,22 @@ You need Docker, [uv](https://docs.astral.sh/uv/) (it installs Python 3.14 for y
 [just](https://github.com/casey/just). Setup takes about 5 minutes and doesn't count towards your time.
 
 ```bash
-just setup      # install the producer's dependencies
-just up         # start Postgres (with pgvector) and RabbitMQ
-just publish    # publish the registry feed to the queue
-just down       # stop everything and delete the data
+just setup
+just up
+just schema
 ```
+
+Run `just consume` in one terminal. Run `just publish` in another to send the full feed. The consumer terminal shows
+an outcome for each delivery. Start `just api` in a third terminal and query the API once the company is stored.
+
+```bash
+curl 'http://127.0.0.1:8000/companies/SYN-001550/similar?limit=5'
+```
+
+The API returns a `recommendations` list of cards with registration number, name, industry, and state.
+The limit defaults to 5 and accepts 1 through 20. Unknown or inactive companies return HTTP 404.
+An active company without a usable vector returns HTTP 200 with an empty list. Run `just test` to check
+ingestion and API behavior.
 
 Postgres is at `postgresql://postgres:postgres@localhost:5432/companies`, and the RabbitMQ management UI is at
 http://localhost:15672 (user `guest`, password `guest`). If those ports are taken on your machine, export
@@ -135,7 +146,19 @@ http://localhost:15672 (user `guest`, password `guest`). If those ports are take
 `RABBITMQ_PORT`.
 
 `just publish` sends the whole feed every time you run it. To start again from an empty queue and database, run
-`just down` and then `just up`.
+`just down`, then repeat the setup commands. `just down` deletes the local database and queue contents.
+
+### Model download and existing company data
+
+The implementation uses BAAI's pretrained English model, `BAAI/bge-small-en-v1.5`. FastEmbed downloads the
+model files into a local cache the first time you run `just consume` or `just reembed`. The initial download
+needs internet access. The consumer loads the model once per process and creates 384-number embeddings on your CPU.
+Postgres stores those vectors, and the API ranks them in Postgres. [Model card](https://huggingface.co/BAAI/bge-small-en-v1.5)
+
+If you already ingested companies using the hashed baseline, stop the consumer and run `just schema` followed
+by `just reembed` before restarting it. The rebuild uses the company text already in Postgres, updates the
+vectors and their model labels together, and preserves the processed message IDs. A feed replay alone skips
+IDs already recorded, so it leaves their old embeddings in place.
 
 ## What's already here
 

@@ -28,4 +28,7 @@ CREATE TABLE IF NOT EXISTS companies (
     embedding vector(384)
 );
 
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS embedding_model text NOT NULL
+    DEFAULT 'hashed-bow-v1';
+
 COMMIT;

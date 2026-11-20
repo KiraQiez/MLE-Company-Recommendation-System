@@ -4,18 +4,19 @@ import asyncio
 import hashlib
 import json
 import logging
-import math
 import os
 import re
+from collections.abc import Callable
 
 import aio_pika
 import psycopg
 from aio_pika.exceptions import ChannelInvalidStateError
 
+from db import database_url
+from embeddings import MODEL_NAME, CompanyEmbedder, embedding_text
 from producer.publish import QUEUE
 from scripts.dataset import parse_timestamp
 
-DIMENSION = 384
 LOGGER = logging.getLogger(__name__)
 
 # A conflict returns no row, so only the transaction that claims the ID can apply the event.
@@ -31,9 +32,9 @@ CLAIM_MESSAGE = """
 UPSERT_COMPANY = """
     INSERT INTO companies (
         registration_number, company_name, nature_of_business, state, industry,
-        source_updated_at, source_message_id, is_active, embedding
+        source_updated_at, source_message_id, is_active, embedding, embedding_model
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s)
     ON CONFLICT (registration_number) DO UPDATE SET
         company_name = EXCLUDED.company_name,
         nature_of_business = EXCLUDED.nature_of_business,
@@ -42,7 +43,8 @@ UPSERT_COMPANY = """
         source_updated_at = EXCLUDED.source_updated_at,
         source_message_id = EXCLUDED.source_message_id,
         is_active = EXCLUDED.is_active,
-        embedding = EXCLUDED.embedding
+        embedding = EXCLUDED.embedding,
+        embedding_model = EXCLUDED.embedding_model
     WHERE (EXCLUDED.source_updated_at, NOT EXCLUDED.is_active, EXCLUDED.source_message_id COLLATE "C")
         > (companies.source_updated_at, NOT companies.is_active, companies.source_message_id COLLATE "C")
 """
@@ -66,20 +68,10 @@ def optional_text(value: object) -> str | None:
     return None
 
 
-def embed(description: str | None) -> str | None:
-    """Return a unit-length hashed word vector, or None if the text has no tokens."""
-    counts = [0] * DIMENSION
-    for token in re.findall(r"[^\W_]+", (description or "").casefold()):
-        digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
-        counts[int.from_bytes(digest, "big") % DIMENSION] += 1
-
-    norm = math.sqrt(sum(count * count for count in counts))
-    if not norm:
-        return None
-    return "[" + ",".join(str(count / norm) for count in counts) + "]"
-
-
-async def persist(db: psycopg.AsyncConnection, message_id: str | None, body: bytes) -> str:
+async def persist(
+    db: psycopg.AsyncConnection, message_id: str | None, body: bytes,
+    embed: Callable[[str], str],
+) -> str:
     """Validate one event and record its ID with any resulting company change."""
     try:
         event = json.loads(body)
@@ -116,21 +108,25 @@ async def persist(db: psycopg.AsyncConnection, message_id: str | None, body: byt
         claim = await db.execute(CLAIM_MESSAGE, (message_id,))
         if await claim.fetchone() is None:
             return "duplicate"
+        text = embedding_text(description, industry)
+        embedding = await asyncio.to_thread(embed, text) if text is not None else None
         result = await db.execute(
             UPSERT_COMPANY,
             (
                 registration, name, description, state, industry, updated_at,
-                message_id, is_active, embed(description) or embed(industry),
+                message_id, is_active, embedding, MODEL_NAME,
             ),
         )
     # A stale event commits its message ID even though the SQL skips the company update.
     return "applied" if result.rowcount else "stale"
 
 
-async def handle_message(db: psycopg.AsyncConnection, message: aio_pika.IncomingMessage) -> str:
+async def handle_message(
+    db: psycopg.AsyncConnection, message: aio_pika.IncomingMessage, embed: Callable[[str], str],
+) -> str:
     """Acknowledge this delivery after its database work succeeds."""
     try:
-        outcome = await persist(db, message.message_id, message.body)
+        outcome = await persist(db, message.message_id, message.body, embed)
     except InvalidEvent as error:
         # Preserve the original bytes for review, including bodies that failed JSON decoding.
         async with db.transaction():
@@ -147,19 +143,17 @@ async def handle_message(db: psycopg.AsyncConnection, message: aio_pika.Incoming
 
 
 async def consume() -> None:
-    postgres_port = os.environ.get("POSTGRES_PORT", "5432")
     rabbitmq_port = os.environ.get("RABBITMQ_PORT", "5672")
-    database_url = os.environ.get(
-        "DATABASE_URL", f"postgresql://postgres:postgres@localhost:{postgres_port}/companies"
-    )
     rabbitmq_url = os.environ.get(
         "RABBITMQ_URL", f"amqp://guest:guest@localhost:{rabbitmq_port}/"
     )
 
+    # Reuse the loaded model across database and RabbitMQ reconnects.
+    embed = await asyncio.to_thread(CompanyEmbedder)
     delay = 1
     while True:
         try:
-            async with await psycopg.AsyncConnection.connect(database_url) as db:
+            async with await psycopg.AsyncConnection.connect(database_url()) as db:
                 async with await aio_pika.connect(rabbitmq_url) as connection:
                     channel = await connection.channel()
                     # Limit this consumer to one unacknowledged delivery at a time.
@@ -168,7 +162,7 @@ async def consume() -> None:
                     LOGGER.info("Consuming from %s", QUEUE)
                     async with queue.iterator(no_ack=False) as messages:
                         async for message in messages:
-                            outcome = await handle_message(db, message)
+                            outcome = await handle_message(db, message, embed)
                             LOGGER.info("outcome=%s message_id=%r", outcome, message.message_id)
                             delay = 1
                     raise ConnectionError("RabbitMQ stopped delivering messages")

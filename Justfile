@@ -2,7 +2,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 default: setup
 
-# Install the ingestion dependencies.
+# Install the application dependencies.
 setup:
     uv sync --locked
 
@@ -26,6 +26,14 @@ down:
 publish:
     uv run python -m producer.publish
 
-# Run ingestion tests against the local Postgres service.
+# Run tests against the local Postgres service.
 test: up
     uv run --locked python -m unittest discover -s tests -v
+
+# Serve the local recommendation API.
+api:
+    uv run --locked uvicorn api.main:app --host 127.0.0.1 --port "${API_PORT:-8000}"
+
+# Replace older vectors with the current CPU model.
+reembed:
+    uv run --locked python -m scripts.reembed
