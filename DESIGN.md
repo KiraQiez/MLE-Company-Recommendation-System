@@ -122,6 +122,8 @@ Postgres uses exact cosine distance (`<=>`) to rank active candidates. It exclud
 
 ## Verification
 
+From the repository root, run `just verify` to repeat the automated tests, fresh setup, feed and replay checks, live API checks, ranking examples, SQL benchmark, and database reconnect test. Run `just verify-browser` to include the Chromium checks at desktop and phone widths. The browser command installs Chromium if needed. Both commands use a temporary Compose project with its own ports and remove it afterward.
+
 A fresh Compose project validated the README setup against an empty database and queue. Each publish sent 2,518 deliveries.
 
 | Run | Applied | Duplicate | Stale | Rejected |

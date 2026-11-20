@@ -37,3 +37,12 @@ api:
 # Replace older vectors with the current CPU model.
 reembed:
     uv run --locked python -m scripts.reembed
+
+# Verify the full feed, live API, and SQL ranking in an isolated Compose project.
+verify: setup
+    uv run --locked python -m scripts.verify
+
+# Include Chromium checks without adding Playwright to the application dependencies.
+verify-browser: setup
+    uv run --locked --with playwright playwright install chromium
+    uv run --locked --with playwright python -m scripts.verify --browser

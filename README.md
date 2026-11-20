@@ -149,6 +149,10 @@ The limit defaults to 5 and accepts 1 through 100. Unknown or inactive companies
 An active company without a usable vector returns HTTP 200 with an empty list. Run `just test` to check
 ingestion and API behavior.
 
+Run `just verify` for the full handoff check, including ingestion, replay, the live API, and SQL ranking timing.
+Use `just verify-browser` to include Chromium layout and navigation checks. Both commands use a separate
+temporary Compose project and clean up its database and queue afterward.
+
 Postgres is at `postgresql://postgres:postgres@localhost:5432/companies`, and the RabbitMQ management UI is at
 http://localhost:15672 (user `guest`, password `guest`). If those ports are taken on your machine, export
 `POSTGRES_PORT`, `RABBITMQ_PORT` or `RABBITMQ_UI_PORT` in your shell before `just up`; `just publish` uses the same
