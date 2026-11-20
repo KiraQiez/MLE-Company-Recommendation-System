@@ -131,8 +131,9 @@ just schema
 Run `just consume` in one terminal. Run `just publish` in another to send the full feed. The consumer terminal shows
 an outcome for each delivery. Start `just api` in a third terminal, then open the company explorer at
 http://127.0.0.1:8000/ once the feed has been ingested. Search by registration number and use the results selector
-to show up to 100 recommendations. Selecting a recommendation opens that company's profile and matches. The portal uses plain HTML, CSS,
-and JavaScript served by FastAPI.
+to show up to 100 recommendations. Selecting a recommendation opens that company's profile and matches. FastAPI
+serves the portal's plain HTML, CSS, and JavaScript. See [DESIGN.md](DESIGN.md) for implementation decisions and
+verification results.
 
 You can also query the API directly.
 
