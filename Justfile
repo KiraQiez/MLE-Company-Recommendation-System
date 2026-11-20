@@ -26,3 +26,6 @@ down:
 publish:
     uv run python -m producer.publish
 
+# Run ingestion tests against the local Postgres service.
+test: up
+    uv run --locked python -m unittest discover -s tests -v
